@@ -22,7 +22,7 @@ class AdNetworkPluginOptions:
 class AcpPlugin:
     def __init__(self, options: AdNetworkPluginOptions):
         self.acp_client = AcpClient(options.api_key, options.acp_token_client)
-        
+
         self.id = "acp_worker"
         self.name = "ACP Worker"
         self.description = """
@@ -46,8 +46,8 @@ class AcpPlugin:
     def add_produce_item(self, item: IInventory) -> None:
         self.produced_inventory.append(item)
 
-    async def get_acp_state(self) -> Dict:
-        server_state = await self.acp_client.get_state()
+    async def get_acp_state(self, function_result: Optional[FunctionResult], agent_state: Optional[any]) -> Dict:
+        server_state = self.acp_client.get_state()
         server_state["inventory"]["produced"] = self.produced_inventory
         return server_state
 
@@ -67,14 +67,14 @@ class AcpPlugin:
                 **(await self.get_acp_state()),
             }
 
-        data = await WorkerConfig.create_async(
+        data = WorkerConfig(
             id=self.id,
             worker_description=self.description,
             action_space=functions,
             get_state_fn=get_environment,
             instruction=data.get("instructions") if data else None
         )
-        
+
         # print(json.dumps(vars(data), indent=2, default=str))
         return data
 
@@ -242,13 +242,13 @@ class AcpPlugin:
                 FunctionResultStatus.FAILED,
                 "Missing job ID - specify which job you're responding to"
             )
-        
+
         if not args.get("decision") or args["decision"] not in ["ACCEPT", "REJECT"]:
             return FunctionResult(
                 FunctionResultStatus.FAILED,
                 "Invalid decision - must be either 'ACCEPT' or 'REJECT'"
             )
-            
+
         if not args.get("reasoning"):
             return FunctionResult(
                 FunctionResultStatus.FAILED,
@@ -257,7 +257,7 @@ class AcpPlugin:
 
         try:
             state = await self.get_acp_state()
-            
+
             job = next(
                 (c for c in state["jobs"]["active"]["asASeller"] if c["jobId"] == int(args["jobId"])),
                 None
@@ -342,7 +342,7 @@ class AcpPlugin:
 
         try:
             state = await self.get_acp_state()
-            
+
             job = next(
                 (c for c in state["jobs"]["active"]["asABuyer"] if c["jobId"] == int(args["jobId"])),
                 None
@@ -417,13 +417,13 @@ class AcpPlugin:
                 FunctionResultStatus.FAILED,
                 "Missing job ID - specify which job you're delivering for"
             )
-            
+
         if not args.get("reasoning"):
             return FunctionResult(
                 FunctionResultStatus.FAILED,
                 "Missing reasoning - explain why you're making this delivery"
             )
-            
+
         if not args.get("deliverable"):
             return FunctionResult(
                 FunctionResultStatus.FAILED,
@@ -432,7 +432,7 @@ class AcpPlugin:
 
         try:
             state = await self.get_acp_state()
-            
+
             job = next(
                 (c for c in state["jobs"]["active"]["asASeller"] if c["jobId"] == int(args["jobId"])),
                 None

@@ -1,5 +1,7 @@
-from typing import List, Optional, Callable, Dict
+from typing import List, Optional, Callable, Dict, Awaitable
 import uuid
+import asyncio
+import inspect
 from game_sdk.game.worker import Worker
 from game_sdk.game.custom_types import Function, FunctionResult, FunctionResultStatus, ActionResponse, ActionType
 from game_sdk.game.api import GAMEClient
@@ -54,7 +56,7 @@ class WorkerConfig:
     def __init__(self,
                  id: str,
                  worker_description: str,
-                 get_state_fn: Callable,
+                 get_state_fn: Callable[[], Awaitable[Dict]],
                  action_space: List[Function],
                  instruction: Optional[str] = None,
                  ):
@@ -63,41 +65,40 @@ class WorkerConfig:
         # worker description for the TASK GENERATOR (to give appropriate tasks) [NOT FOR THE WORKER ITSELF - WORKER WILL STILL USE AGENT DESCRIPTION]
         self.worker_description = worker_description
         self.instruction = instruction
-        self.get_state_fn = get_state_fn
+        self._original_get_state_fn = get_state_fn
 
-        # setup get state function with the instructions
-        self.get_state_fn = lambda function_result, current_state: {
-            "instructions": self.instruction,  # instructions are set up in the state
-            # places the rest of the output of the get_state_fn in the state
-            **get_state_fn(function_result, current_state),
-        }
+        # Check if the provided function is async
+        self.is_async = inspect.iscoroutinefunction(get_state_fn)
+
+        # Setup wrapper function based on whether original is async or not
+        if self.is_async:
+            self.get_state_fn = self._create_async_wrapper()
+        else:
+            self.get_state_fn = self._create_sync_wrapper()
 
         self.action_space: Dict[str, Function] = {
             f.get_function_def()["fn_name"]: f for f in action_space
         }
 
+    def _create_sync_wrapper(self):
+        def wrapper(function_result, current_state):
+            result = self._original_get_state_fn(function_result, current_state)
+            return {
+                "instructions": self.instruction,
+                **result
+            }
+        return wrapper
+
+    def _create_async_wrapper(self):
+        async def wrapper(function_result, current_state):
+            result = await self._original_get_state_fn(function_result, current_state)
+            return {
+                "instructions": self.instruction,
+                **result
+            }
+        return wrapper
 
 class Agent:
-    """
-    Main agent class for the GAME SDK.
-
-    The Agent class represents an autonomous agent that can perform tasks using configured
-    workers. It manages the interaction flow, state management, and task execution within
-    the GAME system.
-
-    Args:
-        api_key (str): Authentication key for API access.
-        name (str): Name of the agent.
-        agent_goal (str): High-level goal or purpose of the agent.
-        agent_description (str): Detailed description of the agent's capabilities.
-        get_agent_state_fn (Callable): Function to retrieve agent's current state.
-
-    The Agent class serves as the primary interface for:
-    - Managing worker configurations
-    - Handling task execution
-    - Maintaining session state
-    - Coordinating API interactions
-    """
     def __init__(self,
                  api_key: str,
                  name: str,
@@ -114,7 +115,6 @@ class Agent:
             self.client = GAMEClient(api_key)
 
         self._api_key: str = api_key
-
         self._model_name: str = model_name
 
         # checks
@@ -136,10 +136,15 @@ class Agent:
         self.current_worker_id = None
 
         # get agent/task generator state function
-        self.get_agent_state_fn = get_agent_state_fn
+        self._original_get_agent_state_fn = get_agent_state_fn
+        self.is_async = inspect.iscoroutinefunction(get_agent_state_fn)
 
         # initialize and set up agent states
-        self.agent_state = self.get_agent_state_fn(None, None)
+        if self.is_async:
+            # Initialize agent state asynchronously using safe_run_async
+            self.agent_state = self.safe_run_async(self._original_get_agent_state_fn(None, None))
+        else:
+            self.agent_state = self._original_get_agent_state_fn(None, None)
 
         # initialize observation
         observation_content = self.agent_state["observations"] if "observations" in self.agent_state else ""
@@ -152,6 +157,41 @@ class Agent:
         self.agent_id = self.client.create_agent(
             self.name, self.agent_description, self.agent_goal
         )
+
+    def safe_run_async(self, coro):
+        """Safely run a coroutine in the current event loop or create a new one"""
+        try:
+            # Try to get the current event loop
+            loop = asyncio.get_event_loop()
+
+            # Check if the loop is running
+            if loop.is_running():
+                # Create a new Future in the current loop
+                future = asyncio.ensure_future(coro, loop=loop)
+                # Wait for it to complete
+                return loop.run_until_complete(future)
+            else:
+                # Run the coroutine in the current loop
+                return loop.run_until_complete(coro)
+        except RuntimeError:
+            # If no event loop exists, create a new one
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
+
+    async def _async_update_agent_state(self, function_result, current_state):
+        """Helper method to update agent state asynchronously"""
+        return await self._original_get_agent_state_fn(function_result, current_state)
+
+    async def _async_update_worker_state(self, worker, function_result, current_state):
+        """Helper method to update worker state asynchronously if needed"""
+        if hasattr(worker, 'is_async') and worker.is_async:
+            return await worker.get_state_fn(function_result, current_state)
+        else:
+            return worker.get_state_fn(function_result, current_state)
 
     def compile(self):
         """ Compile the workers for the agent - i.e. set up task generator"""
@@ -172,8 +212,14 @@ class Agent:
                 feedback_message="",
                 info={},
             )
-            worker_states[worker.id] = worker.get_state_fn(
-                dummy_function_result, self.agent_state)
+
+            # Handle async worker state functions
+            if hasattr(worker, 'is_async') and worker.is_async:
+                worker_states[worker.id] = self.safe_run_async(worker.get_state_fn(
+                    dummy_function_result, self.agent_state))
+            else:
+                worker_states[worker.id] = worker.get_state_fn(
+                    dummy_function_result, self.agent_state)
 
         self.worker_states = worker_states
 
@@ -247,7 +293,6 @@ class Agent:
         return ActionResponse.model_validate(response)
 
     def step(self):
-
         # get next task/action from GAME API
         action_response = self._get_action(self._session.function_result)
         action_type = action_response.action_type
@@ -286,8 +331,14 @@ class Agent:
             print(f"Function result: {self._session.function_result}")
 
             # update worker states
-            updated_worker_state = self.workers[self.current_worker_id].get_state_fn(
-                self._session.function_result, self.worker_states[self.current_worker_id])
+            current_worker = self.workers[self.current_worker_id]
+            if hasattr(current_worker, 'is_async') and current_worker.is_async:
+                updated_worker_state = self.safe_run_async(current_worker.get_state_fn(
+                    self._session.function_result, self.worker_states[self.current_worker_id]))
+            else:
+                updated_worker_state = current_worker.get_state_fn(
+                    self._session.function_result, self.worker_states[self.current_worker_id])
+
             self.worker_states[self.current_worker_id] = updated_worker_state
 
             update_observation = "worker"
@@ -303,16 +354,20 @@ class Agent:
             next_worker = action_response.action_args["location_id"]
             print(f"Next worker selected: {next_worker}")
             self.current_worker_id = next_worker
-            
+
             update_observation = "worker"
         else:
             raise ValueError(
                 f"Unknown action type: {action_response.action_type}")
 
         # update agent state
-        self.agent_state = self.get_agent_state_fn(
-            self._session.function_result, self.agent_state)
-        
+        if self.is_async:
+            self.agent_state = self.safe_run_async(self._async_update_agent_state(
+                self._session.function_result, self.agent_state))
+        else:
+            self.agent_state = self._original_get_agent_state_fn(
+                self._session.function_result, self.agent_state)
+
         # update observation (saved state)
         if update_observation == "task":
             if "observations" in self.agent_state:
