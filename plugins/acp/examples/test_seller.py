@@ -1,62 +1,89 @@
-from typing import List, Dict, Any, Optional,Tuple
-
-from web3 import Web3
-import sys
+import asyncio
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
-from plugins.acp.acp_plugin_gamesdk import acp_plugin
-from plugins.acp.acp_plugin_gamesdk.acp_plugin import AcpPlugin, AdNetworkPluginOptions
-from plugins.acp.acp_plugin_gamesdk.acp_token import AcpToken
-from game_sdk.game.custom_types import Function, FunctionResult, FunctionResultStatus
+from enum import Enum
+from typing import Dict, Any, Optional
+from dataclasses import dataclass
+
+from acp_plugin_gamesdk.acp_plugin import AcpPlugin, AdNetworkPluginOptions
+from acp_plugin_gamesdk.acp_token import AcpToken
+
+# from game_sdk.game.worker import Worker
+from game_sdk.game.custom_types import Function
 from game_sdk.game.agent import Agent, WorkerConfig
+# from game_sdk.game.worker import ExecutableGameFunctionResponse, ExecutableGameFunctionStatus
+
+
+class ExecutableGameFunctionResponse:
+    def __init__(self, status: str, feedback: str):
+        self.status = status
+        self.feedback = feedback
+
+    def to_json(self, id: str) -> dict:
+        return {
+            "action_id": id,
+            "action_status": self.status,
+            "feedback_message": self.feedback,
+        }
+
+class ExecutableGameFunctionStatus(Enum):
+    DONE = "done"
+    FAILED = "failed"
+
+
+acp_api_key = os.environ.get("ACP_API_KEY")
+acp_client_api_key = os.environ.get("ACP_CLIENT_API_KEY")
+game_api_key = os.environ.get("GAME_API_KEY")
 
 def ask_question(query: str) -> str:
     return input(query)
 
+async def generate_meme(args: Dict[str, Any], logger, acp_plugin) -> ExecutableGameFunctionResponse:
+    logger("Generating meme...")
 
-def test():
+    if not args["jobId"]:
+        return ExecutableGameFunctionResponse(
+            ExecutableGameFunctionStatus.FAILED,
+            f"Job {args['jobId']} is invalid. Should only respond to active as a seller job."
+        )
+
+    state = await acp_plugin.get_acp_state()
+
+    job = next(
+        (j for j in state.jobs.active.as_a_seller if j.job_id == int(args["jobId"])),
+        None
+    )
+
+    if not job:
+        return ExecutableGameFunctionResponse(
+            ExecutableGameFunctionStatus.FAILED,
+            f"Job {args['jobId']} is invalid. Should only respond to active as a seller job."
+        )
+
+    url = "http://example.com/meme"
+
+    acp_plugin.add_produce_item({
+        "jobId": int(args["jobId"]),
+        "type": "url",
+        "value": url
+    })
+
+    return ExecutableGameFunctionResponse(
+        ExecutableGameFunctionStatus.DONE,
+        f"Meme generated with the URL: {url}"
+    )
+
+async def test():
     acp_plugin = AcpPlugin(
-        options=AdNetworkPluginOptions(
-            api_key="xxx",
-            acp_token_client=AcpToken(
-                "xxx",
-                "base_sepolia"  # Assuming this is the chain identifier
-            )
+        AdNetworkPluginOptions(
+            api_key=acp_api_key,
+            acp_token_client=AcpToken(acp_client_api_key, "base_sepolia")
         )
     )
-    
-    def get_agent_state(_: Any, _e: Any) -> dict:
-        state = acp_plugin.get_acp_state()
-        print(f"State: {state}")
-        return state
-    
-    def generate_meme(description: str, jobId: str, reasoning: str) -> Tuple[FunctionResultStatus, str, dict]:
-        if not jobId or jobId == 'None':
-            return FunctionResultStatus.FAILED, f"JobId is invalid. Should only respond to active as a seller job.", {}
-
-        state = acp_plugin.get_acp_state()
-        
-        job = next(
-            (j for j in state.jobs.active.as_a_seller if j.job_id == int(jobId)),
-            None
-        )
-
-        if not job:
-            return FunctionResultStatus.FAILED, f"Job {jobId} is invalid. Should only respond to active as a seller job.", {}
-
-        url = "http://example.com/meme"
-
-        acp_plugin.add_produce_item({
-            "jobId": int(jobId),
-            "type": "url",
-            "value": url
-        })
-
-        return FunctionResultStatus.DONE, f"Meme generated with the URL: {url}", {}
 
     core_worker = WorkerConfig(
         id="core-worker",
         worker_description="This worker to provide meme generation as a service where you are selling",
+        get_state_fn=acp_plugin.get_acp_state,
         action_space=[
             Function(
                 fn_name="generate_meme",
@@ -78,30 +105,25 @@ def test():
                         "description": "The reasoning of the tweet"
                     }
                 ],
-                executable=generate_meme
+                executable=lambda args, logger: generate_meme(args, logger, acp_plugin)
             )
-        ],
-        get_state_fn=get_agent_state
+        ]
     )
-    
-    acp_worker =  acp_plugin.get_worker()
+
     agent = Agent(
-            api_key="xxx",
-            name="Memx",
-            agent_goal="To provide meme generation as a service. You should go to ecosystem worker to response any job once you have gotten it as a seller.",
-            agent_description=f"""You are Memx, a meme generator. Meme generation is your life. You always give buyer the best meme.
-
-            {acp_plugin.agent_description}
-            """,
-            workers=[core_worker, acp_worker],
-            get_agent_state_fn=get_agent_state
+        api_key=game_api_key,
+        name="Memx",
+        agent_goal="To provide meme generation as a service. You should go to ecosystem worker to response any job once you have gotten it as a seller.",
+        agent_description=f"You are Memx, a meme generator. Meme generation is your life. You always give buyer the best meme.\n\n{acp_plugin.agent_description}",
+        get_agent_state_fn=acp_plugin.get_acp_state,
+        workers=[core_worker, await acp_plugin.get_worker()]
     )
 
-    agent.compile()
+    await agent.init()
 
     while True:
-        agent.step()
-        ask_question("\nPress any key to continue...\n")
+        await agent.step(verbose=True)
+        await ask_question("\nPress any key to continue...\n")
 
 if __name__ == "__main__":
-    test()
+    asyncio.run(test())
