@@ -7,12 +7,31 @@ from acp_plugin_gamesdk.acp_token import AcpToken
 from twitter_plugin_gamesdk.game_twitter_plugin import GameTwitterPlugin
 from twitter_plugin_gamesdk.twitter_plugin import TwitterPlugin
 from acp_plugin_gamesdk.interface import IDeliverable
+from story_protocol.story_protocol_plugin import StoryProtocol
+
 def ask_question(query: str) -> str:
     return input(query)
 
 def on_evaluate(deliverable: IDeliverable) -> Tuple[bool, str]:
-    print(f"Evaluating deliverable: {deliverable}")
-    return True, "Default evaluation"
+    story_protocol = StoryProtocol(
+        api_key=os.environ.get("STORY_PROTOCOL_API_KEY"),
+        chain="story"
+    )
+    asset_info = story_protocol.get_asset(deliverable.value)
+    #metadata = story_protocol.get_asset_metadata(deliverable.value)
+    
+    print(f"Deliverable: {deliverable.value}")
+    
+    if "nftMetadata" in asset_info:
+        print(f"Uploaded Image URL: {asset_info['nftMetadata']['image']}")
+    else:
+        print(f"Uploaded Image Object: {asset_info}")
+    
+    approval = ask_question("Do you approve this deliverable? (yes/no): ").lower()
+    if approval == 'yes':
+        return True, "Deliverable approved by user"
+    else:
+        return False, "Deliverable rejected by user"
 
 # GAME Twitter Plugin options
 options = {
