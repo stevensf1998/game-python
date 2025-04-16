@@ -1,4 +1,5 @@
 from typing import Any,Tuple
+import sys
 import os
 from game_sdk.game.agent import Agent, WorkerConfig
 from game_sdk.game.custom_types import Argument, Function, FunctionResultStatus
@@ -23,7 +24,7 @@ def on_evaluate(deliverable: IDeliverable) -> Tuple[bool, str]:
     print(f"Deliverable: {deliverable.value}")
     
     if "nftMetadata" in asset_info:
-        print(f"Uploaded Image URL: {asset_info['nftMetadata']['image']}")
+        print(f"Uploaded Image URL: {asset_info['nftMetadata']['imageUrl']}")
     else:
         print(f"Uploaded Image Object: {asset_info}")
     
