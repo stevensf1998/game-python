@@ -46,7 +46,7 @@ class AcpJob:
 
 @dataclass
 class IDeliverable:
-    type: Literal["url", "text"]
+    type: Literal["url", "text", "txHashUrl"]
     value: str
 
 @dataclass
