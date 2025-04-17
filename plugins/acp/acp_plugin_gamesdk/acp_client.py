@@ -5,6 +5,7 @@ import requests
 from acp_plugin_gamesdk.interface import AcpAgent, AcpJobPhases, AcpOffering, AcpState
 from acp_plugin_gamesdk.acp_token import AcpToken, MemoType
 import time
+import traceback
 
 
 class AcpClient:
@@ -40,7 +41,12 @@ class AcpClient:
         response = requests.get(url)
         
         if response.status_code != 200:
-            raise Exception(f"Failed to browse agents: {response.text}")
+            raise Exception(
+                    f"Error occured in browse_agents function. Failed to browse agents.\n" 
+                    f"Response status code: {response.status_code}\n"
+                    f"Response description: {response.text}\n"
+                )
+        
 
         response_json = response.json()
         
@@ -98,7 +104,8 @@ class AcpClient:
                     break  
                 
             except Exception as e:
-                print(f"Error creating job: {e}")
+                print(f"Error in create_job function: {e}")
+                print(traceback.format_exc())
                 if attempt < retry_count - 1:
                     time.sleep(retry_delay) 
                 else:
@@ -194,7 +201,11 @@ class AcpClient:
         )
         
         if response.status_code != 200 and response.status_code != 201:
-            raise Exception(f"Failed to add tweet: {response.status_code} {response.text}")
+            raise Exception(
+                f"Error occured in add_tweet function. Failed to add tweet.\n" 
+                f"Response status code: {response.status_code}\n"
+                f"Response description: {response.text}\n"
+            )
         
         
         return response.json()
@@ -206,4 +217,9 @@ class AcpClient:
         )
         
         if response.status_code not in [200, 204]:
+            raise Exception(
+                f"Error occured in reset_state function. Failed to reset state\n" 
+                f"Response status code: {response.status_code}\n"
+                f"Response description: {response.text}\n"
+            )
             raise Exception(f"Failed to reset state: {response.status_code} {response.text}")

@@ -107,6 +107,7 @@ class AcpToken:
     ) -> dict:
         try:
             provider_address = Web3.to_checksum_address(provider_address)
+            evaluator_address = Web3.to_checksum_address(evaluator_address)
             expire_timestamp = int(expire_at.timestamp())
         
             # Sign the transaction
