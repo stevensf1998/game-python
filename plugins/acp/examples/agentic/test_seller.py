@@ -1,9 +1,14 @@
+from dacite import from_dict
+from dacite.config import Config
+from rich import print, box
+from rich.panel import Panel
+
 from typing import Any,Tuple
-import os
 from twitter_plugin_gamesdk.game_twitter_plugin import GameTwitterPlugin
 from twitter_plugin_gamesdk.twitter_plugin import TwitterPlugin
 from acp_plugin_gamesdk.acp_plugin import AcpPlugin, AcpPluginOptions
 from acp_plugin_gamesdk.acp_token import AcpToken
+from acp_plugin_gamesdk.interface import IDeliverable, AcpState, AcpJobPhasesDesc, IInventory
 from game_sdk.game.custom_types import Argument, Function, FunctionResult, FunctionResultStatus
 from game_sdk.game.agent import Agent, WorkerConfig
 
@@ -62,10 +67,8 @@ def test():
     #     )
     # )
     
-    def get_agent_state(_: Any, _e: Any) -> dict:
+    def get_agent_state() -> dict:
         state = acp_plugin.get_acp_state()
-        print(f"State:")
-        print(state)
         return state
     
     def generate_meme(description: str, jobId: int, reasoning: str) -> Tuple[FunctionResultStatus, str, dict]:
@@ -84,11 +87,13 @@ def test():
 
         url = "http://example.com/meme"
 
-        acp_plugin.add_produce_item({
-            "jobId": jobId,
-            "type": "url",
-            "value": url
-        })
+        meme = IInventory(
+            type="url",
+            value=url,
+            jobId=jobId
+        )
+
+        acp_plugin.add_produce_item(meme)
 
         return FunctionResultStatus.DONE, f"Meme generated with the URL: {url}", {}
 
@@ -138,7 +143,11 @@ def test():
     agent.compile()
 
     while True:
+        print("🟢"*40)
         agent.step()
+        state = from_dict(data_class=AcpState, data=agent.agent_state, config=Config(type_hooks={AcpJobPhasesDesc: AcpJobPhasesDesc}))
+        print(Panel(f"{state}", title="Agent State", box=box.ROUNDED, title_align="left"))
+        print("🔴"*40)
         ask_question("\nPress any key to continue...\n")
 
 if __name__ == "__main__":

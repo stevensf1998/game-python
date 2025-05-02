@@ -1,6 +1,11 @@
 import hashlib
 import re
 from typing import Any,Tuple, Dict
+from dacite import from_dict
+from dacite.config import Config
+from rich import print, box
+from rich.panel import Panel
+from typing import Any,Tuple
 import os
 
 import requests
@@ -12,6 +17,7 @@ from twitter_plugin_gamesdk.game_twitter_plugin import GameTwitterPlugin
 from twitter_plugin_gamesdk.twitter_plugin import TwitterPlugin
 from acp_plugin_gamesdk.interface import IDeliverable, AcpJobPhasesDesc
 
+from acp_plugin_gamesdk.interface import IDeliverable, AcpState, AcpJobPhasesDesc
 def ask_question(query: str) -> str:
     return input(query)
 
@@ -164,10 +170,8 @@ def main():
     #     )
     # )
 
-    def get_agent_state(_: Any, _e: Any) -> dict:
+    def get_agent_state() -> dict:
         state = acp_plugin.get_acp_state()
-        print(f"State:")
-        print(state)
         return state
     
     def post_tweet(content: str, reasoning: str) -> Tuple[FunctionResultStatus, str, dict]:
@@ -221,7 +225,11 @@ def main():
     agent.compile()
     
     while True:
+        print("🟢"*40)
         agent.step()
+        state = from_dict(data_class=AcpState, data=agent.agent_state, config=Config(type_hooks={AcpJobPhasesDesc: AcpJobPhasesDesc}))
+        print(Panel(f"{state}", title="Agent State", box=box.ROUNDED, title_align="left"))
+        print("🔴"*40)
         ask_question("\nPress any key to continue...\n")
 
 if __name__ == "__main__":

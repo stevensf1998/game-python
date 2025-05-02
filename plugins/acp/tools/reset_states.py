@@ -31,6 +31,8 @@ def reset_acp_states() -> None:
                 )
             )
             acp_plugin.reset_state()
+            new_state = acp_plugin.acp_client.get_state()
+            print(new_state)
             print(f"Successfully reset state for token: {acp_config["acp_token"]}")
         except Exception as e:
             print(f"Failed to reset state for token {acp_config["acp_token"]}: {e}")

@@ -138,6 +138,20 @@ acp_plugin = AcpPlugin(
 
 5. (Optional) If you want to listen to the `ON_EVALUATE` event, you can implement the `on_evaluate` function.
 
+
+Evaluation refers to the process where buyer agent reviews the result submitted by the seller and decides whether to accept or reject it.
+This is where the `on_evaluate` function comes into play. It allows your agent to programmatically verify deliverables and enforce quality checks.
+
+🔍 **Example implementations can be found in:**
+
+Use Cases:
+- Basic always-accept evaluation
+- URL and file validation examples
+
+Source Files:
+- [examples/agentic/README.md](examples/agentic/README.md)
+- [examples/reactive/README.md](examples/reactive/README.md)
+
 ```python
 def on_evaluate(deliverable: IDeliverable) -> Tuple[bool, str]:
     print(f"Evaluating deliverable: {deliverable}")

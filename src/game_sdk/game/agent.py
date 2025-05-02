@@ -5,6 +5,9 @@ from game_sdk.game.custom_types import Function, FunctionResult, FunctionResultS
 from game_sdk.game.api import GAMEClient
 from game_sdk.game.api_v2 import GAMEClientV2
 
+from rich import print, box
+from rich.panel import Panel
+
 class Session:
     """
     Manages a unique session for agent interactions.
@@ -69,12 +72,21 @@ class WorkerConfig:
         self.get_state_fn = lambda function_result, current_state: {
             "instructions": self.instruction,  # instructions are set up in the state
             # places the rest of the output of the get_state_fn in the state
-            **get_state_fn(function_result, current_state),
+            **get_state_fn(),
         }
 
         self.action_space: Dict[str, Function] = {
             f.get_function_def()["fn_name"]: f for f in action_space
         }
+
+    def __str__(self) -> str:
+        output = (
+            f"- Worker ID: {self.id}\n"
+            f"- Description: {self.worker_description}\n"
+            f"- Instruction: {self.instruction}\n"
+            f"- Action Space: {self.action_space}\n"
+        )
+        return output
 
 
 class Agent:
@@ -139,7 +151,7 @@ class Agent:
         self.get_agent_state_fn = get_agent_state_fn
 
         # initialize and set up agent states
-        self.agent_state = self.get_agent_state_fn(None, None)
+        self.agent_state = self.get_agent_state_fn()
 
         # initialize observation
         self.observation = None
@@ -240,7 +252,7 @@ class Agent:
             model_name=self._model_name
         )
         
-        print(f"123 Response: {response}")
+        # print(f"123 Response: {response}")
 
         return ActionResponse.model_validate(response)
 
@@ -248,39 +260,37 @@ class Agent:
         # get next task/action from GAME API
         action_response = self._get_action(self._session.function_result)
         action_type = action_response.action_type
-        
-        print("#" * 50)
-        print("STEP")
-        print(f"Current Task: {action_response.agent_state.current_task}")
-        print(f"Action response: {action_response}")
-        print(f"Action type: {action_type}")
+        print(Panel(f"{action_response}", title="👟 Agent Step", box=box.ROUNDED, title_align="left"))
 
         # if new task is updated/generated
         if (
             action_response.agent_state.hlp
             and action_response.agent_state.hlp.change_indicator
         ):
-            print("New task generated")
-            print(f"Task: {action_response.agent_state.current_task}")
+            print(Panel(f"{action_response.agent_state.current_task}", title="New Task Generated", box=box.ROUNDED, title_align="left"))
 
         # execute action
+        out = ""
         if action_type in [
             ActionType.CALL_FUNCTION,
             ActionType.CONTINUE_FUNCTION,
         ]:
-            print(f"Action Selected: {action_response.action_args['fn_name']}")
-            print(f"Action Args: {action_response.action_args['args']}")
+            
 
             if not action_response.action_args:
                 raise ValueError("No function information provided by GAME")
+            
+            # Get the worker and function
+            worker = self.workers[self.current_worker_id]
+            function_name = action_response.action_args["fn_name"]
+            function = worker.action_space[function_name]
+            out += (f"👷 Worker: {worker.id}\n")
+            out += (f"🔧 Function Name: {function_name}\n")
+            out += (f"📋 Function Description: {function.fn_description}\n")
+            out += (f"🔠 Function Arguments: {action_response.action_args.get('args', {})}\n")
 
-            self._session.function_result = (
-                self.workers[self.current_worker_id]
-                .action_space[action_response.action_args["fn_name"]]
-                .execute(**action_response.action_args)
-            )
-
-            print(f"Function result: {self._session.function_result}")
+            self._session.function_result = function.execute(**action_response.action_args)
+            out += (f"🏭 Function Results:\n{self._session.function_result}\n")
 
             # update worker states
             updated_worker_state = self.workers[self.current_worker_id].get_state_fn(
@@ -290,7 +300,8 @@ class Agent:
             update_observation = "worker"
 
         elif action_response.action_type == ActionType.WAIT:
-            print("Task ended completed or ended (not possible with current actions)")
+            out += ("🔄 Waiting...")
+            out += ("Task ended completed or ended (not possible with current actions)")
             update_observation = "task"
 
         elif action_response.action_type == ActionType.GO_TO:
@@ -298,17 +309,21 @@ class Agent:
                 raise ValueError("No location information provided by GAME")
 
             next_worker = action_response.action_args["location_id"]
-            print(f"Next worker selected: {next_worker}")
+            out += (f"🚶 Going to... {next_worker}")
+            # print_output += (f"Next worker selected: {next_worker}")
             self.current_worker_id = next_worker
             
             update_observation = "worker"
         else:
+            out += (f"🚫 Unknown action type: {action_response.action_type}")
             raise ValueError(
                 f"Unknown action type: {action_response.action_type}")
+        
+        print(Panel(f"{out}", title=f"Action Type: {action_type.value}", box=box.ROUNDED, title_align="left"))
+        
 
         # update agent state
-        self.agent_state = self.get_agent_state_fn(
-            self._session.function_result, self.agent_state)
+        self.agent_state = self.get_agent_state_fn()
         
         # update observation (saved state) - no interruptions (is_global should always be False)
         if update_observation == "task":

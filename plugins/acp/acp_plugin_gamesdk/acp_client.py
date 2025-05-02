@@ -1,11 +1,15 @@
-from datetime import datetime, timedelta
-from typing import List, Optional
-from web3 import Web3
+import json
 import requests
-from acp_plugin_gamesdk.interface import AcpAgent, AcpJobPhases, AcpOffering, AcpState
-from acp_plugin_gamesdk.acp_token import AcpToken, MemoType
 import time
 import traceback
+
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional
+from web3 import Web3
+
+from acp_plugin_gamesdk.interface import AcpAgent, AcpJobPhases, AcpOffering, AcpState, AcpJobPhasesDesc
+from acp_plugin_gamesdk.acp_token import AcpToken, MemoType
+from dacite import from_dict, Config
 
 
 class AcpClient:
@@ -25,21 +29,29 @@ class AcpClient:
             f"{self.base_url}/states/{self.agent_wallet_address}",
             headers={"x-api-key": self.api_key}
         )
-        return response.json()
+        payload = response.json()
+        result = from_dict(data_class=AcpState, data=payload, config=Config(type_hooks={AcpJobPhasesDesc: AcpJobPhasesDesc}))
+        return result
 
-    def browse_agents(self, cluster: Optional[str] = None, query: Optional[str] = None) -> List[AcpAgent]:
+    def browse_agents(
+        self,
+        cluster: Optional[str] = None,
+        query: Optional[str] = None,
+        rerank: Optional[bool] = True,
+        top_k: Optional[int] = 1,
+    ) -> List[AcpAgent]:
+        
         url = f"{self.acp_base_url}/agents"
-        
-        if query:
-            url += f"?search={requests.utils.quote(query)}"
-            
-        if cluster:
-            # Add & if there's already a parameter, otherwise add ?
-            separator = "&" if query else "?"
-            url += f"{separator}filters[cluster]={requests.utils.quote(cluster)}"
 
-        response = requests.get(url)
-        
+        params = {
+            "search": query,
+            "filters[cluster]": cluster,
+            "filters[walletAddress][$notIn]": self.agent_wallet_address,
+            "rerank": "true" if rerank else "false",
+            "top_k": top_k,
+        }
+        response = requests.get(url, params=params)
+
         if response.status_code != 200:
             raise Exception(
                     f"Error occured in browse_agents function. Failed to browse agents.\n" 
@@ -64,19 +76,26 @@ class AcpClient:
                     name=agent["name"],
                     description=agent["description"],
                     wallet_address=agent["walletAddress"],
-                    offerings=offerings
+                    offerings=offerings,
+                    score=agent["score"],
+                    explanation=agent["explanation"]
                 )
             )
             
         return result
 
-    def create_job(self, provider_address: str, price: float, job_description: str, evaluator_address: str) -> int:
-        expire_at = datetime.now() + timedelta(days=1)
-        
-        tx_result =  self.acp_token.create_job(
-            provider_address=provider_address,
-            evaluator_address=evaluator_address,
-            expire_at=expire_at
+    def create_job(
+            self,
+            provider_address: str,
+            price: float,
+            job_description: str,
+            evaluator_address: str,
+            expired_at: datetime,
+    ) -> int:
+        tx_result = self.acp_token.create_job(
+            provider_address = provider_address,
+            evaluator_address = evaluator_address,
+            expire_at = expired_at
         )
         
         job_id = None
@@ -128,7 +147,7 @@ class AcpClient:
             "providerAddress": provider_address,
             "description": job_description,
             "price": price,
-            "expiredAt": expire_at.isoformat(),
+            "expiredAt": expired_at.astimezone(timezone.utc).isoformat(),
             "evaluatorAddress": evaluator_address
         }
 
@@ -173,7 +192,15 @@ class AcpClient:
         time.sleep(5)
         self.acp_token.approve_allowance(amount_wei)
         time.sleep(5)
-        return self.acp_token.sign_memo(memo_id, True, reason)
+        self.acp_token.sign_memo(memo_id, True, reason)
+        time.sleep(5)
+        return self.acp_token.create_memo(
+            job_id=job_id,
+            content=f"Payment of {amount} made {reason}",
+            memo_type=MemoType.MESSAGE,
+            is_secured=False,
+            next_phase=AcpJobPhases.EVALUATION
+        )
 
     def deliver_job(self, job_id: int, deliverable: str):
         return self.acp_token.create_memo(
@@ -222,4 +249,16 @@ class AcpClient:
                 f"Response status code: {response.status_code}\n"
                 f"Response description: {response.text}\n"
             )
-            raise Exception(f"Failed to reset state: {response.status_code} {response.text}")
+        
+    def delete_completed_job(self, job_id: int) -> None:
+        response = requests.delete(
+            f"{self.base_url}/{job_id}/wallet/{self.agent_wallet_address}",
+            headers={"x-api-key": self.api_key}
+        )
+        
+        if response.status_code not in [200, 204]:
+            raise Exception(
+                f"Error occurred in delete_completed_job function. Failed to delete job.\n"
+                f"Response status code: {response.status_code}\n"
+                f"Response description: {response.text}\n"
+            )

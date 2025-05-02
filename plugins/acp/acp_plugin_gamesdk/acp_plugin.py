@@ -3,8 +3,9 @@ import signal
 import sys
 from typing import List, Dict, Any, Optional,Tuple
 import json
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, asdict
+from datetime import datetime, timezone, timedelta
+import traceback
 
 import socketio
 import socketio.client
@@ -15,7 +16,7 @@ from twitter_plugin_gamesdk.twitter_plugin import TwitterPlugin
 from twitter_plugin_gamesdk.game_twitter_plugin import GameTwitterPlugin
 from acp_plugin_gamesdk.acp_client import AcpClient
 from acp_plugin_gamesdk.acp_token import AcpToken
-from acp_plugin_gamesdk.interface import AcpJobPhasesDesc, IDeliverable, IInventory
+from acp_plugin_gamesdk.interface import AcpJobPhasesDesc, IDeliverable, IInventory, AcpJob
 
 @dataclass
 class AcpPluginOptions:
@@ -25,12 +26,16 @@ class AcpPluginOptions:
     cluster: Optional[str] = None
     evaluator_cluster: Optional[str] = None
     on_evaluate: Optional[Callable[[IDeliverable], Tuple[bool, str]]] = None
+    on_phase_change: Optional[Callable[[AcpJob], None]] = None
+    job_expiry_duration_mins: Optional[int] = None
+    
 
 SocketEvents = {
     "JOIN_EVALUATOR_ROOM": "joinEvaluatorRoom",
     "LEAVE_EVALUATOR_ROOM": "leaveEvaluatorRoom", 
     "ON_EVALUATE": "onEvaluate",
-    "ROOM_JOINED" : "roomJoined"
+    "ROOM_JOINED" : "roomJoined",
+    "ON_PHASE_CHANGE": "onPhaseChange"
 }
 
 class AcpPlugin:
@@ -63,11 +68,17 @@ class AcpPlugin:
             
         self.produced_inventory: List[IInventory] = []
         self.acp_base_url = self.acp_token_client.acp_base_url if self.acp_token_client.acp_base_url is None else "https://acpx-staging.virtuals.io/api"
-        if (options.on_evaluate is not None):
+        if options.on_evaluate is not None or options.on_phase_change is not None:
             print("Initializing socket")
-            self.on_evaluate = options.on_evaluate
             self.socket = None
+            if options.on_evaluate is not None:
+                self.on_evaluate = options.on_evaluate
+            if options.on_phase_change is not None:
+                self.on_phase_change = options.on_phase_change
             self.initializeSocket()
+        self.job_expiry_duration_mins = options.job_expiry_duration_mins if options.job_expiry_duration_mins is not None else 1440
+        
+        
         
     def initializeSocket(self) -> Tuple[bool, str]:
         """
@@ -99,15 +110,23 @@ class AcpPlugin:
                     is_approved, reasoning = self.on_evaluate(deliverable)
                     
                     self.acp_token_client.sign_memo(memo_id, is_approved, reasoning)
+                    
+                        # Set up event handler for phase changes
+            @self.socket.on(SocketEvents["ON_PHASE_CHANGE"])
+            def on_phase_change(data):
+                if hasattr(self, 'on_phase_change') and self.on_phase_change:
+                    print(f"on_phase_change: {data}")
+                    self.on_phase_change(data)
             
             # Set up cleanup function for graceful shutdown
             def cleanup():
                 if self.socket:
                     print("Disconnecting socket")
-                    
                     import time
                     time.sleep(1)
                     self.socket.disconnect()
+                    
+                    
             
             def signal_handler(sig, frame):
                 cleanup()
@@ -122,6 +141,8 @@ class AcpPlugin:
             return False, f"Failed to initialize socket: {str(e)}"
     
     
+    def set_on_phase_change(self, on_phase_change: Callable[[AcpJob], None]) -> None:
+        self.on_phase_change = on_phase_change
 
     def add_produce_item(self, item: IInventory) -> None:
         self.produced_inventory.append(item)
@@ -129,10 +150,14 @@ class AcpPlugin:
     def reset_state(self) -> None:
         self.acp_client.reset_state()
         
+    def delete_completed_job(self, job_id: int) -> None:
+        self.acp_client.delete_completed_job(job_id)
+        
     def get_acp_state(self) -> Dict:
         server_state = self.acp_client.get_state()
-        server_state["inventory"]["produced"] = self.produced_inventory
-        return server_state
+        server_state.inventory.produced = self.produced_inventory
+        state = asdict(server_state)
+        return state
 
     def get_worker(self, data: Optional[Dict] = None) -> WorkerConfig:
         functions = data.get("functions") if data else [
@@ -180,18 +205,42 @@ class AcpPlugin:
     def _search_agents_executable(self,reasoning: str, keyword: str) -> Tuple[FunctionResultStatus, str, dict]:
         if not reasoning:
             return FunctionResultStatus.FAILED, "Reasoning for the search must be provided. This helps track your decision-making process for future reference.", {}
-            
-        agents = self.acp_client.browse_agents(self.cluster, keyword)
-        
+
+        agents = self.acp_client.browse_agents(self.cluster, keyword, rerank=True, top_k=1)
+
         if not agents:
             return FunctionResultStatus.FAILED, "No other trading agents found in the system. Please try again later when more agents are available.", {}
-        
-        return FunctionResultStatus.DONE, json.dumps({
-            "availableAgents": [{"id": agent.id, "name": agent.name, "description": agent.description, "wallet_address": agent.wallet_address, "offerings": [{"name": offering.name, "price": offering.price} for offering in agent.offerings] if agent.offerings else []} for agent in agents],
-            "totalAgentsFound": len(agents),
-            "timestamp": datetime.now().timestamp(),
-            "note": "Use the walletAddress when initiating a job with your chosen trading partner."
-        }), {}
+
+        return (
+            FunctionResultStatus.DONE,
+            json.dumps(
+                {
+                    "availableAgents": [
+                        {
+                            "id": agent.id,
+                            "name": agent.name,
+                            "description": agent.description,
+                            "wallet_address": agent.wallet_address,
+                            "offerings": (
+                                [
+                                    {"name": offering.name, "price": offering.price}
+                                    for offering in agent.offerings
+                                ]
+                                if agent.offerings
+                                else []
+                            ),
+                            "score": agent.score,
+                            "explanation": agent.explanation
+                        }
+                        for agent in agents
+                    ],
+                    "totalAgentsFound": len(agents),
+                    "timestamp": datetime.now().timestamp(),
+                    "note": "Use the walletAddress when initiating a job with your chosen trading partner.",
+                }
+            ),
+            {},
+        )
 
     @property
     def search_agents_functions(self) -> Function:
@@ -269,7 +318,14 @@ class AcpPlugin:
             executable=self._initiate_job_executable
         )
 
-    def _initiate_job_executable(self, sellerWalletAddress: str, price: str, reasoning: str, serviceRequirements: str, requireEvaluation: bool, evaluatorKeyword: str, tweetContent: Optional[str] = None) -> Tuple[FunctionResultStatus, str, dict]:
+    def _initiate_job_executable(self, sellerWalletAddress: str, price: str, reasoning: str, serviceRequirements: str, requireEvaluation: str, evaluatorKeyword: str, tweetContent: Optional[str] = None) -> Tuple[FunctionResultStatus, str, dict]:
+        if isinstance(requireEvaluation, str):
+            require_evaluation = requireEvaluation.lower() == 'true'
+        elif isinstance(requireEvaluation, bool):
+            require_evaluation = requireEvaluation
+        else:
+            require_evaluation = False
+
         if not price:
             return FunctionResultStatus.FAILED, "Missing price - specify how much you're offering per unit", {}
         
@@ -285,13 +341,13 @@ class AcpPlugin:
             if not sellerWalletAddress:
                 return FunctionResultStatus.FAILED, "Missing seller wallet address - specify the agent you want to buy from", {}
             
-            if bool(requireEvaluation) and not evaluatorKeyword:
+            if require_evaluation and not evaluatorKeyword:
                 return FunctionResultStatus.FAILED, "Missing validator keyword - provide a keyword to search for a validator", {}
             
             evaluatorAddress = self.acp_token_client.get_agent_wallet_address()
             
-            if bool(requireEvaluation):
-                validators = self.acp_client.browse_agents(self.evaluator_cluster, evaluatorKeyword)
+            if require_evaluation:
+                validators = self.acp_client.browse_agents(self.evaluator_cluster, evaluatorKeyword, rerank=True, top_k=1)
                 
                 if len(validators) == 0:
                     return FunctionResultStatus.FAILED, "No evaluator found - try a different keyword", {}
@@ -299,11 +355,13 @@ class AcpPlugin:
                 evaluatorAddress = validators[0].wallet_address
             
             # ... Rest of validation logic ...
+            expired_at = datetime.now(timezone.utc) + timedelta(minutes=self.job_expiry_duration_mins)
             job_id = self.acp_client.create_job(
                 sellerWalletAddress,
                 float(price),
                 serviceRequirements,
-                evaluatorAddress
+                evaluatorAddress,
+                expired_at
             )
             
             if (hasattr(self, 'twitter_plugin') and self.twitter_plugin is not None and tweetContent is not None):
@@ -321,6 +379,7 @@ class AcpPlugin:
                 "timestamp": datetime.now().timestamp(),
             }), {}
         except Exception as e:
+            print(traceback.format_exc())
             return FunctionResultStatus.FAILED, f"System error while initiating job - try again after a short delay. {str(e)}", {}
 
     @property
@@ -494,6 +553,7 @@ class AcpPlugin:
                 "timestamp": datetime.now().timestamp()
             }), {}
         except Exception as e:
+            print(traceback.format_exc())
             return FunctionResultStatus.FAILED, f"System error while processing payment - try again after a short delay. {str(e)}", {}
 
     @property
@@ -564,7 +624,7 @@ class AcpPlugin:
                 return FunctionResultStatus.FAILED, f"Cannot deliver - job is in '{job['phase']}' phase, must be in 'transaction' phase", {}
 
             produced = next(
-                (i for i in self.produced_inventory if i["jobId"] == job["jobId"]),
+                (i for i in self.produced_inventory if i.jobId == job["jobId"]),
                 None
             )
 
@@ -599,4 +659,5 @@ class AcpPlugin:
                 "timestamp": datetime.now().timestamp()
             }), {}
         except Exception as e:
+            print(traceback.format_exc())
             return FunctionResultStatus.FAILED, f"System error while delivering items - try again after a short delay. {str(e)}", {}
